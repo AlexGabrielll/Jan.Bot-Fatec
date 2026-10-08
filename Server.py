@@ -1,6 +1,7 @@
 import os
 import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,16 @@ def initialize_database() -> None:
                 ("sabonete", "higiene"),
                 ("agua", "bebidas"),
                 ("coca", "bebidas"),
+                ("arroz", "mercearia"),
+                ("feijao", "mercearia"),
+                ("cafe", "mercearia"),
+                ("macarrao", "mercearia"),
+                ("leite", "bebidas"),
+                ("banana", "hortifruti"),
+                ("maca", "hortifruti"),
+                ("shampoo", "higiene"),
+                ("papel higienico", "higiene"),
+                ("detergente", "limpeza"),
             ],
         )
 
@@ -59,66 +70,78 @@ def generate_sql(question: str) -> str:
 def generate_sql_with_model(question: str) -> str:
     """Gera SQL com um modelo instruct compatível com completions/chat completions."""
     try:
-        import dspy
+        from openai import OpenAI
     except ImportError as error:
-        raise RuntimeError("A dependência dspy não está instalada.") from error
+        raise RuntimeError("Instale a dependência openai no ambiente do servidor.") from error
 
-    class TextToSQL(dspy.Signature):
-        """
-        Responda perguntas variadas em linguagem natural convertendo-as para SQL.
-        Use somente o schema fornecido e gere uma única consulta SELECT.
-        Não invente colunas, tabelas ou dados e não inclua explicações, markdown
-        ou comandos que alterem o banco.
-        """
-
-        dbschema = dspy.InputField(
-            desc="Schema completo do banco de dados disponível para consulta"
-        )
-        question = dspy.InputField(
-            desc=(
-                "Pergunta do usuário em português. Interprete sinônimos, "
-                "plural e diferentes formas de solicitar a mesma informação."
-            )
-        )
-        sql_query = dspy.OutputField(
-            desc=(
-                "Uma única consulta SQLite SELECT válida sobre produtos, "
-                "sem explicação, markdown ou ponto e vírgula"
-            )
-        )
-
-    model = dspy.LM(
-        os.getenv("LOCAL_LM_MODEL", "openai/Qwen2.5-7B-Instruct"),
-        api_base=os.getenv("LOCAL_LM_API_BASE", "http://localhost:1337/v1"),
+    client = OpenAI(
+        base_url=os.getenv("LOCAL_LM_API_BASE", "http://127.0.0.1:1337/v1"),
         api_key=os.getenv("LOCAL_LM_API_KEY", "not-needed"),
+    )
+    response = client.chat.completions.create(
+        model=os.getenv("LOCAL_LM_MODEL", "Jan-code-4b-Q4_K_M"),
         temperature=float(os.getenv("LOCAL_LM_TEMPERATURE", "0")),
+        max_tokens=200,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Você converte perguntas em português para uma única consulta "
+                    "SQLite SELECT. Use somente a tabela produtos(nome, departamento). "
+                    "Não invente colunas, não altere dados, não use markdown e não "
+                    "inclua ponto e vírgula. Responda apenas com o SQL."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Schema: {SQL_SCHEMA}\nPergunta: {question}",
+            },
+        ],
     )
-    dspy.configure(lm=model)
-    prediction = dspy.ChainOfThought(TextToSQL)(
-        dbschema=SQL_SCHEMA,
-        question=question,
-    )
-    return validate_select(prediction.sql_query)
+    sql_query = response.choices[0].message.content
+    if not sql_query:
+        raise ValueError("O modelo não retornou uma consulta SQL.")
+    return validate_select(sql_query)
 
 
 def generate_sql_fallback(question: str) -> str:
     """Atende perguntas básicas enquanto o servidor não tiver um LLM generativo."""
     normalized = " ".join(question.lower().strip().split())
+    comparable = "".join(
+        character
+        for character in unicodedata.normalize("NFD", normalized)
+        if unicodedata.category(character) != "Mn"
+    )
     if not normalized:
         raise ValueError("Informe uma pergunta não vazia.")
 
-    if re.search(r"\b(quais|listar|liste|mostrar|mostre)\b.*\bprodutos\b", normalized):
+    if re.search(
+        r"\b(quais|qual|listar|liste|lista|mostrar|mostre|tem|possui)\b"
+        r".*\b(produtos|itens|mercadorias)\b",
+        comparable,
+    ):
         return "SELECT nome, departamento FROM produtos ORDER BY nome"
 
-    if re.search(r"\b(quais|listar|liste|mostrar|mostre)\b.*\bdepartamentos\b", normalized):
+    if re.search(
+        r"\b(quais|qual|listar|liste|lista|mostrar|mostre|tem|possui)\b"
+        r".*\b(departamentos|categorias|setores)\b",
+        comparable,
+    ):
         return "SELECT DISTINCT departamento FROM produtos ORDER BY departamento"
 
-    product_match = re.search(
-        r"\b(?:do|da|de|produto)\s+([a-zà-ÿ]+)\b", normalized
-    )
-    if product_match and re.search(
-        r"\b(departamento|categoria|setor)\b", normalized
-    ):
+    if re.search(r"\b(departamento|categoria|setor)\b", comparable):
+        product_match = re.search(
+            r"\b(?:do|da|de|produto|item)\s+([a-zà-ÿ]+)\b", normalized
+        )
+        if not product_match:
+            product_match = re.search(
+                r"\b(?:o|a)\s+([a-zà-ÿ]+)\b", normalized
+            )
+        if not product_match:
+            raise ValueError(
+                "Informe o nome do produto, por exemplo: "
+                "'qual o departamento do sabonete?'."
+            )
         product_name = product_match.group(1)
         escaped_name = product_name.replace("'", "''")
         return (
@@ -127,8 +150,7 @@ def generate_sql_fallback(question: str) -> str:
         )
 
     raise ValueError(
-        "O servidor local não possui um modelo generativo ativo. "
-        "Carregue um modelo de chat/texto ou faça uma pergunta básica, "
+        "Não entendi a pergunta. Pergunte, por exemplo, "
         "como 'qual o departamento do sabonete?' ou 'quais produtos existem?'."
     )
 
