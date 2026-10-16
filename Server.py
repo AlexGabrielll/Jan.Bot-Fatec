@@ -13,7 +13,8 @@ DATABASE_PATH = Path(os.getenv("DATABASE_PATH", BASE_DIR / "lojas.db"))
 SQL_SCHEMA = """
 CREATE TABLE produtos (
     nome TEXT NOT NULL PRIMARY KEY,
-    departamento TEXT NOT NULL
+    departamento TEXT NOT NULL,
+    quantidade INTEGER NOT NULL DEFAULT 0 CHECK (quantidade >= 0)
 )
 """
 
@@ -32,10 +33,23 @@ def initialize_database() -> None:
             """
             CREATE TABLE IF NOT EXISTS produtos (
                 nome TEXT NOT NULL PRIMARY KEY,
-                departamento TEXT NOT NULL
+                departamento TEXT NOT NULL,
+                quantidade INTEGER NOT NULL DEFAULT 0 CHECK (quantidade >= 0)
             )
             """
         )
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(produtos)")
+        }
+        if "quantidade" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE produtos
+                ADD COLUMN quantidade INTEGER NOT NULL DEFAULT 0
+                CHECK (quantidade >= 0)
+                """
+            )
         connection.executemany(
             "INSERT OR IGNORE INTO produtos (nome, departamento) VALUES (?, ?)",
             [
@@ -87,7 +101,8 @@ def generate_sql_with_model(question: str) -> str:
                 "role": "system",
                 "content": (
                     "Você converte perguntas em português para uma única consulta "
-                    "SQLite SELECT. Use somente a tabela produtos(nome, departamento). "
+                    "SQLite SELECT. Use somente a tabela "
+                    "produtos(nome, departamento, quantidade). "
                     "Não invente colunas, não altere dados, não use markdown e não "
                     "inclua ponto e vírgula. Responda apenas com o SQL."
                 ),
@@ -120,7 +135,24 @@ def generate_sql_fallback(question: str) -> str:
         r".*\b(produtos|itens|mercadorias)\b",
         comparable,
     ):
-        return "SELECT nome, departamento FROM produtos ORDER BY nome"
+        return "SELECT nome, departamento, quantidade FROM produtos ORDER BY nome"
+
+    if re.search(r"\b(quantidade|estoque)\b", comparable):
+        product_match = re.search(
+            r"\b(?:do|da|de|produto|item)\s+(.+?)\s*[?.!]*$", normalized
+        )
+        if not product_match:
+            raise ValueError(
+                "Informe o produto, por exemplo: 'qual o estoque do sabonete?'."
+            )
+        product_name = product_match.group(1).strip(" ?.! ")
+        if not product_name:
+            raise ValueError("Informe o nome do produto.")
+        escaped_name = product_name.replace("'", "''")
+        return (
+            "SELECT quantidade FROM produtos "
+            f"WHERE lower(nome) = lower('{escaped_name}')"
+        )
 
     if re.search(
         r"\b(quais|qual|listar|liste|lista|mostrar|mostre|tem|possui)\b"
@@ -212,6 +244,119 @@ def query_route():
     except (ValueError, sqlite3.Error) as error:
         return jsonify(error=f"Consulta inválida: {error}"), 400
     return jsonify(results=results)
+
+
+@app.post("/products")
+def create_product_route():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error="Informe os dados do produto em JSON."), 400
+    if set(body) - {"nome", "departamento", "quantidade"}:
+        return jsonify(error="O produto contém campos não permitidos."), 400
+
+    name = body.get("nome")
+    department = body.get("departamento")
+    quantity = body.get("quantidade", 0)
+    if not isinstance(name, str) or not name.strip():
+        return jsonify(error="Informe um nome de produto válido."), 400
+    if not isinstance(department, str) or not department.strip():
+        return jsonify(error="Informe um departamento válido."), 400
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 0:
+        return jsonify(error="A quantidade deve ser um inteiro não negativo."), 400
+
+    product = {
+        "nome": name.strip(),
+        "departamento": department.strip(),
+        "quantidade": quantity,
+    }
+    try:
+        with get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO produtos (nome, departamento, quantidade)
+                VALUES (?, ?, ?)
+                """,
+                (product["nome"], product["departamento"], product["quantidade"]),
+            )
+    except sqlite3.IntegrityError:
+        return jsonify(error="Já existe um produto com esse nome."), 409
+    return jsonify(product=product), 201
+
+
+@app.patch("/products/<string:product_name>")
+def update_product_route(product_name: str):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not body:
+        return jsonify(error="Informe ao menos um campo para editar."), 400
+    if set(body) - {"nome", "departamento"}:
+        return jsonify(error="Edite somente nome ou departamento nesta rota."), 400
+
+    updates = {}
+    for field in ("nome", "departamento"):
+        if field in body:
+            value = body[field]
+            if not isinstance(value, str) or not value.strip():
+                return jsonify(error=f"Informe um valor válido para {field}."), 400
+            updates[field] = value.strip()
+
+    assignments = ", ".join(f"{field} = ?" for field in updates)
+    values = [*updates.values(), product_name]
+    try:
+        with get_connection() as connection:
+            cursor = connection.execute(
+                f"UPDATE produtos SET {assignments} WHERE nome = ?", values
+            )
+            if cursor.rowcount == 0:
+                return jsonify(error="Produto não encontrado."), 404
+            updated_name = updates.get("nome", product_name)
+            row = connection.execute(
+                """
+                SELECT nome, departamento, quantidade
+                FROM produtos WHERE nome = ?
+                """,
+                (updated_name,),
+            ).fetchone()
+    except sqlite3.IntegrityError:
+        return jsonify(error="Já existe um produto com esse nome."), 409
+
+    return jsonify(product=dict(row))
+
+
+@app.patch("/products/<string:product_name>/quantity")
+def update_product_quantity_route(product_name: str):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {"quantidade"}:
+        return jsonify(error="Informe somente o campo quantidade."), 400
+    quantity = body["quantidade"]
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 0:
+        return jsonify(error="A quantidade deve ser um inteiro não negativo."), 400
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE produtos SET quantidade = ? WHERE nome = ?",
+            (quantity, product_name),
+        )
+        if cursor.rowcount == 0:
+            return jsonify(error="Produto não encontrado."), 404
+        row = connection.execute(
+            """
+            SELECT nome, departamento, quantidade
+            FROM produtos WHERE nome = ?
+            """,
+            (product_name,),
+        ).fetchone()
+    return jsonify(product=dict(row))
+
+
+@app.delete("/products/<string:product_name>")
+def delete_product_route(product_name: str):
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "DELETE FROM produtos WHERE nome = ?", (product_name,)
+        )
+    if cursor.rowcount == 0:
+        return jsonify(error="Produto não encontrado."), 404
+    return jsonify(message="Produto excluído.")
 
 
 if __name__ == "__main__":

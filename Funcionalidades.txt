@@ -1,0 +1,34 @@
+A versão antiga do projeto implementava um fluxo de consulta de produtos. A versão atual preserva esse fluxo e acrescenta operações para gerenciar o catálogo e o estoque.
+
+O sistema tem três componentes principais: o bot do Telegram recebe as mensagens, o servidor Flask processa as solicitações e o SQLite armazena os dados.
+
+1. Banco de dados e migração
+Antes, a tabela produtos tinha duas colunas: nome e departamento. Agora também possui quantidade, definida como inteiro, com valor padrão 0 e uma restrição para não aceitar valores negativos.
+
+O servidor verifica a estrutura da tabela usando PRAGMA table_info. Se encontrar um banco antigo sem quantidade, executa ALTER TABLE para adicionar a coluna. Essa migração preserva os registros existentes e dá a eles quantidade inicial igual a zero.
+
+2. Consultas e operações de escrita no servidor
+As rotas antigas continuam cuidando das consultas:
+
+/generate-sql recebe uma pergunta e tenta convertê-la em SQL usando o modelo local; se necessário, usa um tradutor simples de perguntas comuns.
+/query executa a consulta, mas a validação permite apenas SELECT.
+As alterações no banco são feitas por rotas separadas:
+
+POST /products: cadastra um produto.
+PATCH /products/<nome>: altera nome ou departamento.
+PATCH /products/<nome>/quantity: define a quantidade atual em estoque.
+DELETE /products/<nome>: exclui o produto.
+Essa separação é importante: o modelo de linguagem pode ajudar a consultar os dados, mas não recebe permissão para gerar comandos de escrita. Para as operações de alteração, o servidor valida os dados e usa parâmetros SQL, reduzindo o risco de comandos malformados ou de injeção de SQL.
+
+3. Comandos do Telegram
+Na versão antiga, o bot tratava mensagens de texto como perguntas sobre produtos. Na atual, handlers específicos reconhecem os comandos antes do handler genérico de texto:
+
+/adicionar nome | departamento | quantidade
+/editar nome atual | nome ou departamento | novo valor
+/estoque nome | quantidade
+/excluir nome
+O bot separa os argumentos pelo caractere |, verifica alguns valores localmente e envia a operação ao servidor por HTTP. O servidor então responde com sucesso ou erro, e o bot apresenta essa resposta no chat.
+
+Por exemplo, /estoque arroz | 15 define o estoque do arroz como 15; não acrescenta 15 à quantidade anterior. O usuário pode continuar fazendo perguntas em texto, como antes, e as consultas de listagem agora também podem incluir a quantidade.
+
+Ainda falta restringir quais usuários do Telegram podem alterar dados e pedir confirmação antes de excluir. Portanto, a versão atual adiciona as operações, mas ainda não implementa essas proteções de uso.

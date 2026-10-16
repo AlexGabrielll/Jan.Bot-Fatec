@@ -1,0 +1,15 @@
+****ESTES COMANDOS APENAS TEM FUNCIONALIDADE REAL NA MINHA MÁQUINA LOCAL, PARA O FUNCIONAMENTO EM OUTRAS MÁQUINAS OS ENDEREÇOS NOS COMANDOS DEVEM SER ALTERADOS****
+
+Abra um PowerShell para o servidor:
+
+cd "C:\Users\gabri\OneDrive\Desktop\Projeto TeleBot"
+& ".\.venv\Scripts\python.exe" Server.py
+
+Em outro PowerShell, configure o token sem gravá-lo no código:
+
+$env:TELEGRAM_BOT_TOKEN = Read-Host "Cole o token do Telegram"
+
+Depois inicie o bot no mesmo PowerShell em que foi configurado seu TELEGRAM_BOT_TOKEN:
+
+cd "C:\Users\gabri\OneDrive\Desktop\Projeto TeleBot"
+& ".\.venv\Scripts\python.exe" Bot.py
